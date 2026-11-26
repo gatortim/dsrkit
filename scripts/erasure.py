@@ -16,6 +16,7 @@ import argparse
 import csv
 import datetime as dt
 import json
+import os
 import pathlib
 import sys
 import uuid
@@ -90,9 +91,19 @@ def load_state(path: pathlib.Path) -> dict:
 
 
 def save_state(path: pathlib.Path, state: dict) -> None:
+    """Write atomically, owner-only.
+
+    The ledger holds a legal name, date of birth, ZIP, email and phone in plain text. 0600 is not
+    paranoia: it is the minimum for a file whose whole purpose is to hold PII, and it survives the
+    directory being synced or backed up.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + ".tmp")
     tmp.write_text(json.dumps(state, indent=2, sort_keys=True))
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
     tmp.replace(path)
 
 
@@ -113,21 +124,23 @@ def open_requests(state: dict):
 
 def request_deadlines(request: dict) -> dict:
     filed = parse_date(request["filed_on"])
+    juris = (request.get("jurisdiction") or "CA").upper()
     if request.get("class") == "broker":
-        cycle = drop_cycle_days(filed)
+        cycle = drop_cycle_days(filed) if juris == "CA" else CCPA_RESPONSE_DAYS
     elif request.get("class") == "machine":
         cycle = MACHINE_CONTRACT_DAYS
     else:
         cycle = CCPA_RESPONSE_DAYS
     return {
-        # Brokers owe no acknowledgment under DROP: the obligation is the access/process cycle,
-        # not the CCPA's 10-business-day ack. Showing a CCPA ack date on a broker row is a
-        # credibility bug in the evidence pack.
-        "ack": None if request.get("class") == "broker"
-        else add_business_days(filed, CCPA_ACK_BUSINESS_DAYS),
+        # The 10-business-day acknowledgment is 11 CCR 7021 - a California regulation. Brokers owe
+        # none under DROP, and no other state imposes it, so printing one for a Colorado filing
+        # invents a deadline the controller never had.
+        "ack": add_business_days(filed, CCPA_ACK_BUSINESS_DAYS) if juris == "CA" and request.get("class") != "broker"
+        else None,
         "response": add_days(filed, cycle),
         "extension": add_days(filed, cycle + CCPA_EXTENSION_DAYS) if cycle == CCPA_RESPONSE_DAYS else None,
-        "status_visible": add_days(filed, DROP_STATUS_VISIBLE_DAYS) if request.get("class") == "broker" else None,
+        "status_visible": add_days(filed, DROP_STATUS_VISIBLE_DAYS)
+        if juris == "CA" and request.get("class") == "broker" else None,
     }
 
 
@@ -249,22 +262,51 @@ def cmd_targets(args) -> None:
     raise SystemExit("targets: expected add|list|import")
 
 
-def _cites(klass: str) -> list:
-    if klass == "broker":
-        return [
-            "Cal. Civ. Code 1798.105 (right to delete)",
-            "Cal. Civ. Code 1798.99.86 (DROP; $200 per request per day, administrative fine)",
-            "Cal. Civ. Code 1798.130(a)(2); 11 CCR 7021 (timelines)",
-        ]
+def _cites(klass: str, jurisdiction: str = "CA") -> list:
+    """Statutory cites for the request body.
+
+    Never silently fall back to California when the subject lives elsewhere: a Colorado filing that
+    cites the CCPA is a filing the controller can ignore, and it marks the sender as a copy-paster.
+    Unknown jurisdictions get an instruction to supply the statute rather than a plausible guess.
+    """
+    juris = (jurisdiction or "CA").upper()
+
     if klass == "machine":
         return [
             "No statutory right for a machine identity: contractual / security hygiene only",
             "Record the vendor's stated retention and backup expiry window, not a legal deadline",
         ]
+
+    if juris == "CA":
+        if klass == "broker":
+            return [
+                "Cal. Civ. Code 1798.105 (right to delete)",
+                "Cal. Civ. Code 1798.99.86 (DROP; $200 per request per day, administrative fine)",
+                "Cal. Civ. Code 1798.130(a)(2); 11 CCR 7021 (timelines)",
+            ]
+        return [
+            "Cal. Civ. Code 1798.105 (right to delete)",
+            "Cal. Civ. Code 1798.130(a)(2) (45 days, +45)",
+            "11 CCR 7021 (10 business days ack); 11 CCR 7022 (requests to delete)",
+        ]
+
+    if juris == "CO":
+        cites = [
+            "C.R.S. 6-1-1306(1) (consumer rights, including the right to delete)",
+            "C.R.S. 6-1-1306(2)(a) (inform within 45 days; one 45-day extension, reasons given within the first 45)",
+            "C.R.S. 6-1-1306(2)(b) (a refusal must state reasons and the appeal instructions)",
+            "C.R.S. 6-1-1306(3) (internal appeal: 45 days, extendable 60)",
+            "Opt-out is a separate request: C.R.S. 6-1-1306(1)(a)(IV)(B) + 4 CCR 904-3 Part 5 (GPC)",
+        ]
+        if klass == "broker":
+            cites.insert(0, "C.R.S. 6-1-1306(1)(a)(I)(B) (right to opt out of sale, for a broker)")
+            cites.append("Colorado has no DROP equivalent: this filing stands alone, per target")
+        return cites
+
     return [
-        "Cal. Civ. Code 1798.105 (right to delete)",
-        "Cal. Civ. Code 1798.130(a)(2) (45 days, +45)",
-        "11 CCR 7021 (10 business days ack); 11 CCR 7022 (requests to delete)",
+        f"JURISDICTION {juris}: no cite table in this tool",
+        "Paste the state statute for the right to delete, the response period, and the appeal path",
+        "Verify the cite at the state AG site or the statute itself before sending - do not guess",
     ]
 
 
@@ -334,17 +376,24 @@ def cmd_file(args) -> None:
     else:
         cycle = CCPA_RESPONSE_DAYS
 
+    # One source of truth for dates: ask the same function the clock and report use, so a Colorado
+    # filing cannot inherit California's acknowledgment date from a second, drifting copy of the rule.
+    provisional = {
+        "class": target["class"],
+        "filed_on": filed.isoformat(),
+        "jurisdiction": state["subject"].get("jurisdiction", "CA"),
+    }
     packet = {
         "target": target["name"],
         "class": target["class"],
         "method": args.method,
         "destination": target["portal"] if args.method in ("portal", "api") else target["email"],
         "filed_on": filed.isoformat(),
-        "ack_due": _iso_or_dash(None if target["class"] == "broker"
-                                else add_business_days(filed, CCPA_ACK_BUSINESS_DAYS)),
-        "response_due": add_days(filed, cycle).isoformat(),
+        "ack_due": _iso_or_dash(request_deadlines(provisional)["ack"]),
+        "response_due": request_deadlines(provisional)["response"].isoformat(),
         "identifiers": state["subject"]["identifiers"],
-        "cites": _cites(target["class"]),
+        "cites": _cites(target["class"], state["subject"].get("jurisdiction", "CA")),
+        "jurisdiction": state["subject"].get("jurisdiction", "CA"),
     }
     if not packet["destination"]:
         print(f"WARNING: target {args.target!r} has no portal or email. `targets add --portal/--email` first.")
@@ -367,6 +416,7 @@ def cmd_file(args) -> None:
         "target": args.target,
         "target_name": target["name"],
         "class": target["class"],
+        "jurisdiction": state["subject"].get("jurisdiction", "CA"),
         "method": args.method,
         "attest": args.attest,
         "filed_on": filed.isoformat(),
@@ -548,8 +598,7 @@ def cmd_preflight(args) -> None:
     print(f"  targets with no portal or email:    {len(no_channel)}")
     print()
     blockers = []
-    if subject["jurisdiction"].upper() != "CA":
-        blockers.append("jurisdiction is not CA: DROP does not apply, use controller paths only")
+    juris = subject["jurisdiction"].upper()
     for key in ("names", "dob", "zips"):
         if not ids.get(key):
             blockers.append(f"identifier missing: {key}")
@@ -559,9 +608,24 @@ def cmd_preflight(args) -> None:
             print(f"  - {item}")
         print(f"\nFill them in {path} under subject.identifiers, then re-run preflight.")
         return
-    print("READY for DROP: submit at https://consumer.drop.privacy.ca.gov/ (residency check first),")
-    print("then record it:  file --target <target> --method api --execute --attest self --receipt <DROP ID>")
-    print("Drop the 8-digit DROP ID into the ledger note so status polls can cite it.")
+
+    if juris == "CA":
+        print("READY for DROP: submit at https://consumer.drop.privacy.ca.gov/ (residency check first),")
+        print("then record it:  file --target <target> --method api --execute --attest self --receipt <DROP ID>")
+        print("Drop the 8-digit DROP ID into the ledger note so status polls can cite it.")
+        return
+
+    # No DROP outside California. Not a blocker - a different path, and saying otherwise would leave
+    # a Colorado filer stuck at a check they can never clear.
+    print(f"READY - jurisdiction {juris}: no DROP. File per target.")
+    print(f"  targets enumerated: {len(targets)}  (broker={by_class.get('broker', 0)}, "
+          f"controller={by_class.get('controller', 0)}, machine={by_class.get('machine', 0)})")
+    if not targets:
+        print("  next: python3 scripts/enumerate.py --input domains.txt --gpc --out enumerated.json")
+        print("        then paste the 'targets add' lines it prints")
+    print(f"  clock: 45 days per controller (§6-1-1306(2)(a) for CO), no acknowledgment duty to track")
+    print("  before filing: GPC on, advertising IDs deleted, per-service email aliases")
+    print("  after a denial: appeal with the controller, then the state AG - not a lawsuit")
 
 
 def cmd_report(args) -> None:
@@ -640,6 +704,12 @@ def cmd_selftest(_args) -> None:
     check("deadlines broker", request_deadlines({"filed_on": "2026-08-01", "class": "broker"})["response"], dt.date(2026, 9, 15))
     check("deadlines controller extension", request_deadlines({"filed_on": "2026-08-01", "class": "controller"})["extension"], dt.date(2026, 10, 30))
     check("90 day visibility", request_deadlines({"filed_on": "2026-08-01", "class": "broker"})["status_visible"], dt.date(2026, 10, 30))
+    # Jurisdiction guards: a Colorado filing must not inherit California's acknowledgment duty or cites.
+    check("CO controller has no ack duty", request_deadlines({"filed_on": "2026-08-01", "class": "controller", "jurisdiction": "CO"})["ack"], None)
+    check("CO controller response is 45d", request_deadlines({"filed_on": "2026-08-01", "class": "controller", "jurisdiction": "CO"})["response"], dt.date(2026, 9, 15))
+    check("CO broker uses 45d, not the DROP cycle", request_deadlines({"filed_on": "2026-12-01", "class": "broker", "jurisdiction": "CO"})["response"], dt.date(2027, 1, 15))
+    check("CO cites are Colorado", any("6-1-1306" in c for c in _cites("controller", "CO")), True)
+    check("unknown jurisdiction refuses to guess CA", any("no cite table" in c for c in _cites("controller", "TX")), True)
 
     failures = 0
     for label, got, want, ok in checks:

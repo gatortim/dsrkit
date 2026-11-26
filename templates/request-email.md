@@ -11,8 +11,17 @@ portal. Send from an address you control and keep the sent copy.
 
 To the Privacy Office:
 
-I am requesting the deletion of my personal information under the California Consumer Privacy Act,
-Cal. Civ. Code §1798.105. Please treat this email as a verifiable consumer request to delete.
+I am requesting the deletion of my personal information under {{legal_basis}}. Please treat this email
+as a verifiable consumer request to delete.
+
+Use the cites your ledger printed for your own state — do not copy California's into a filing
+elsewhere:
+
+- California: `the California Consumer Privacy Act, Cal. Civ. Code §1798.105`
+- Colorado: `the Colorado Privacy Act, C.R.S. §6-1-1306(1), and the 45-day response period in §6-1-1306(2)(a)`
+
+A filing that cites the wrong state's statute is a filing the recipient can set aside, and it tells
+them you copied a template.
 
 **Identifying information**, so you can locate my records:
 

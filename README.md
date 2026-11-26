@@ -89,15 +89,25 @@ and `Opted-out` does **not** mean deleted.
 
 Your ledger contains your name, date of birth, ZIP, email, phone in plain text. That is deliberate:
 it is the minimum identifier set a controller needs, and it must not be encrypted behind something
-you can lose. Keep it outside this repo — `.gitignore` excludes `ledger*.json`, `*.evidence/`, and
-`enumerated.json` so an accidental `git add -A` cannot publish your identity.
+you can lose. The ledger is written `0600` (owner-only) and `.gitignore` excludes `ledger*.json`,
+`*.evidence/`, and `enumerated.json` so an accidental `git add -A` cannot publish your identity.
+
+**Do not type your date of birth into a shell command.** `init` writes an empty identifier skeleton
+for exactly this reason — edit `ledger.json` in an editor and let the shell history stay clean:
+
+```bash
+python3 scripts/erasure.py init --subject self --jurisdiction CO --state ~/privacy/ledger.json
+$EDITOR ~/privacy/ledger.json          # fill subject.identifiers here, not on the command line
+python3 scripts/erasure.py identifiers --show --state ~/privacy/ledger.json   # masked sanity check
+```
 
 ## Status
 
-`v0.1.0` — the ledger and deadline arithmetic are exercised end to end (10/10 self-test, full
-file→poll→verify→report cycle run against a 625-broker registry). The enumerator has been run
-against nine live domains and produces usable output, with the failures it should have: bot walls
-return `NO-POLICY` rather than pretending.
+`v0.1.0` — the ledger and deadline arithmetic are exercised end to end (15/15 self-test, full
+file→poll→verify→report cycle run against a 625-broker registry). Deadlines and statutory cites are
+jurisdiction-aware: a Colorado filing gets Colorado cites, no California acknowledgment date, and no
+DROP cycle. The enumerator has been run against nine live domains and produces usable output, with
+the failures it should have: bot walls return `NO-POLICY` rather than pretending.
 
 **Known gaps, honestly:** Colorado's appeal clock (a second 45-day track) is not modelled yet; DSR
 vendor fingerprints are heuristic; no state other than CA and CO has a worked request template;
