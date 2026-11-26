@@ -1,0 +1,23 @@
+# Your identity lives in these files. Never commit them.
+ledger*.json
+*.ledger.json
+enumerated*.json
+!examples/enumerated.example.json
+*.evidence/
+evidence-*/
+evidence-pack.md
+privacy/
+domains.txt
+identifiers*
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Editors / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
